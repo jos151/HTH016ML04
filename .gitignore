@@ -57,6 +57,3 @@ data/raw/*.7z
 # OS generated files
 .DS_Store
 Thumbs.db
-
-# Streamlit local credentials
-.streamlit/credentials.toml

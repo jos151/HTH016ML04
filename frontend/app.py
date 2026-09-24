@@ -180,7 +180,7 @@ def handle_reset():
     st.session_state["show_simulation"] = False
     st.session_state["reset_trigger"] += 1
 
-if st.sidebar.button("🔄 Reset Scenario", use_container_width=True, on_click=handle_reset):
+if st.sidebar.button("🔄 Reset Scenario", width="stretch", on_click=handle_reset):
     st.sidebar.info("Scenario parameters reset to baseline defaults.")
 
 # Pre-populated inputs with session state keys
@@ -247,8 +247,8 @@ method_input = st.sidebar.selectbox(
 )
 
 col_run, col_sim = st.sidebar.columns(2)
-run_button = col_run.button("🚀 Run Forecast & Allocation", type="primary", use_container_width=True)
-sim_button = col_sim.button("📊 Simulate Promotion", use_container_width=True)
+run_button = col_run.button("🚀 Run Forecast & Allocation", type="primary", width="stretch")
+sim_button = col_sim.button("📊 Simulate Promotion", width="stretch")
 
 if sim_button:
     st.session_state["show_simulation"] = True
@@ -352,7 +352,7 @@ else:
             }
         )[["Store ID", "Forecast demand", "Allocated units", "Shortage", "Excess"]]
 
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width="stretch", hide_index=True)
 
         st.divider()
 
@@ -421,7 +421,7 @@ else:
                     "Demand Delta": (df_a["forecasted_demand"] - df_b["forecasted_demand"]).values,
                     "Allocation Delta": (df_a["allocated_units"] - df_b["allocated_units"]).values,
                 })
-                st.dataframe(promo_comp_table, use_container_width=True, hide_index=True)
+                st.dataframe(promo_comp_table, width="stretch", hide_index=True)
 
             with tab_holiday:
                 st.subheader("Holiday Seasonality Impact: Standard Week vs. Holiday Week (+15% Across All Stores)")
@@ -469,6 +469,6 @@ else:
                         "Holiday Allocated": df_ha["allocated_units"].values,
                         "Demand Uplift": (df_ha["forecasted_demand"] - df_hb["forecasted_demand"]).values,
                     })
-                    st.dataframe(hol_table, use_container_width=True, hide_index=True)
+                    st.dataframe(hol_table, width="stretch", hide_index=True)
                 else:
                     st.info("Holiday simulation data available once backend finishes processing.")
