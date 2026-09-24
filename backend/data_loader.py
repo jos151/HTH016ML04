@@ -33,6 +33,9 @@ def load_demand_data(filepath=None) -> pd.DataFrame:
     else:
         filepath = Path(filepath)
 
+    if not filepath.exists():
+        raise FileNotFoundError(f"Sales dataset not found at: {filepath}")
+
     df = pd.read_csv(filepath)
 
     # Standardize column naming if variations exist

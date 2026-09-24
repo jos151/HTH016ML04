@@ -1,15 +1,23 @@
-"""Streamlit dashboard interface for demand forecasting and inventory allocation."""
+"""Streamlit dashboard interface for demand forecasting and inventory allocation.
 
-import json
+Runs standalone on Streamlit Community Cloud by directly importing and executing
+backend business logic (data ingestion, forecasting, and optimization).
+"""
+
+from pathlib import Path
 import random
-import urllib.request
-import urllib.error
-import streamlit as st
+import sys
 import pandas as pd
+import streamlit as st
 
-import os
+# Ensure repository root is on sys.path for direct module imports on Streamlit Cloud
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-API_BASE_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000")
+from backend.allocation import allocate_inventory, allocate_inventory_lp
+from backend.data_loader import load_demand_data
+from backend.forecasting import forecast_demand
 
 st.set_page_config(
     page_title="Demand Forecasting & Inventory Allocation",
@@ -41,7 +49,7 @@ promo_stores = st.sidebar.multiselect(
     "Stores to Promo-Boost",
     options=["STORE_1", "STORE_2", "STORE_3", "STORE_4", "STORE_5"],
     default=[],
-    help="Select stores participating in promotional demand campaigns.",
+    help="Select stores participating in promotional demand campaigns (+30% boost).",
 )
 
 allocation_method = st.sidebar.selectbox(
@@ -56,51 +64,40 @@ run_button = col_run.button("Run", type="primary", use_container_width=True)
 sim_button = col_sim.button("Simulate Promotion", use_container_width=True)
 
 
-def fetch_forecast(horizon_days: int = 7, holiday: bool = False):
-    url = f"{API_BASE_URL}/forecast?horizon_days={horizon_days}&is_holiday_week={str(holiday).lower()}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def fetch_allocation(units: int, method: str = "proportional", promo_boost: dict = None):
-    url = f"{API_BASE_URL}/allocate"
-    payload = {"total_available_units": int(units), "method": method}
-    if promo_boost:
-        payload["promo_boost"] = promo_boost
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
+def run_pipeline(units: int, is_holiday: bool, method: str, promo_boost: dict = None):
+    """Executes data loading, demand forecasting, and inventory allocation directly."""
+    raw_df = load_demand_data()
+    forecast_df = forecast_demand(
+        df=raw_df,
+        horizon_days=7,
+        promo_boost=promo_boost,
+        is_holiday_week=is_holiday,
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
 
-
-def compute_allocation(demand_series: pd.Series, available_units: float) -> pd.DataFrame:
-    df = demand_series.to_frame(name="forecasted_demand").reset_index()
-    total_demand = df["forecasted_demand"].sum()
-    if total_demand == 0:
-        df["allocated_units"] = 0.0
-    elif available_units >= total_demand:
-        df["allocated_units"] = df["forecasted_demand"]
+    if method == "lp":
+        alloc_df = allocate_inventory_lp(
+            forecast_df=forecast_df,
+            total_available_units=units,
+        )
     else:
-        df["allocated_units"] = ((df["forecasted_demand"] / total_demand) * available_units).round(2)
-    df["shortage"] = (df["forecasted_demand"] - df["allocated_units"]).clip(lower=0.0).round(2)
-    df["excess"] = (df["allocated_units"] - df["forecasted_demand"]).clip(lower=0.0).round(2)
-    return df
+        alloc_df = allocate_inventory(
+            forecast_df=forecast_df,
+            total_available_units=units,
+        )
+
+    return forecast_df, alloc_df
 
 
 if run_button:
     try:
-        with st.spinner("Connecting to API and calculating allocations..."):
-            forecast_data = fetch_forecast(horizon_days=7, holiday=is_holiday_week)
-            allocation_data = fetch_allocation(units=total_available_units, method=allocation_method)
-
-        forecast_df = pd.DataFrame(forecast_data)
-        alloc_df = pd.DataFrame(allocation_data)
+        with st.spinner("Calculating demand forecast and optimizing inventory allocation..."):
+            base_promo = {s: 1.30 for s in promo_stores} if promo_stores else None
+            forecast_df, alloc_df = run_pipeline(
+                units=total_available_units,
+                is_holiday=is_holiday_week,
+                method=allocation_method,
+                promo_boost=base_promo,
+            )
 
         # Warning banner if total shortage > 0
         total_shortage = alloc_df["shortage"].sum()
@@ -144,39 +141,39 @@ if run_button:
         shortage_excess_chart = alloc_df.set_index("store_id")[["shortage", "excess"]]
         st.bar_chart(shortage_excess_chart)
 
-    except urllib.error.URLError as err:
-        st.error(
-            f"❌ Unable to connect to backend server at `{API_BASE_URL}`. "
-            f"Please make sure FastAPI is running (`python -m uvicorn backend.main:app --port 8000`).\n\n"
-            f"Error details: {err}"
-        )
+    except FileNotFoundError as fnf_err:
+        st.error(f"📁 **Dataset File Error:** {fnf_err}")
     except Exception as exc:
-        st.error(f"❌ An error occurred: {exc}")
+        st.error(f"❌ **An unexpected error occurred:** {exc}")
 
 elif sim_button:
     try:
         with st.spinner("Simulating promotional boost on a random store..."):
-            # 1. Fetch baseline allocation (before)
-            before_data = fetch_allocation(units=total_available_units, method=allocation_method)
-            before_df = pd.DataFrame(before_data)
+            base_promo = {s: 1.30 for s in promo_stores} if promo_stores else {}
+
+            # 1. Baseline allocation (Before)
+            _, before_df = run_pipeline(
+                units=total_available_units,
+                is_holiday=is_holiday_week,
+                method=allocation_method,
+                promo_boost=base_promo if base_promo else None,
+            )
 
             # 2. Pick a random store to promo-boost by +30% (1.30x)
             store_list = before_df["store_id"].tolist()
             chosen_store = random.choice(store_list)
             boost_factor = 1.30
 
-            # 3. Call endpoint with the promo_boost payload body
-            sim_payload = {chosen_store: boost_factor}
-            _ = fetch_allocation(
-                units=total_available_units,
-                method=allocation_method,
-                promo_boost=sim_payload,
-            )
+            # 3. Simulated allocation with promo boost (After)
+            sim_promo = dict(base_promo)
+            sim_promo[chosen_store] = round(sim_promo.get(chosen_store, 1.0) * boost_factor, 2)
 
-            # 4. Generate post-promo demand and allocation
-            demand_series = before_df.set_index("store_id")["forecasted_demand"].copy()
-            demand_series[chosen_store] = round(demand_series[chosen_store] * boost_factor, 2)
-            after_df = compute_allocation(demand_series, total_available_units)
+            _, after_df = run_pipeline(
+                units=total_available_units,
+                is_holiday=is_holiday_week,
+                method=allocation_method,
+                promo_boost=sim_promo,
+            )
 
         # Simulation Banner
         st.info(
@@ -200,11 +197,13 @@ elif sim_button:
         col1, col2, col3, col4 = st.columns(4)
         before_demand = before_df["forecasted_demand"].sum()
         after_demand = after_df["forecasted_demand"].sum()
+        chosen_before_demand = before_df.loc[before_df["store_id"] == chosen_store, "forecasted_demand"].values[0]
+        chosen_after_demand = after_df.loc[after_df["store_id"] == chosen_store, "forecasted_demand"].values[0]
         chosen_before_alloc = before_df.loc[before_df["store_id"] == chosen_store, "allocated_units"].values[0]
         chosen_after_alloc = after_df.loc[after_df["store_id"] == chosen_store, "allocated_units"].values[0]
 
         col1.metric("Total Demand", f"{after_demand:,.2f}", delta=f"{after_demand - before_demand:+.2f}")
-        col2.metric(f"{chosen_store} Demand", f"{demand_series[chosen_store]:,.2f}", delta=f"+30% promo")
+        col2.metric(f"{chosen_store} Demand", f"{chosen_after_demand:,.2f}", delta=f"{chosen_after_demand - chosen_before_demand:+.2f}")
         col3.metric(f"{chosen_store} Allocated", f"{chosen_after_alloc:,.2f}", delta=f"{chosen_after_alloc - chosen_before_alloc:+.2f}")
         col4.metric("Total Shortage", f"{total_shortage_after:,.2f}", delta=f"{shortage_diff:+.2f}", delta_color="inverse")
 
@@ -233,14 +232,10 @@ elif sim_button:
         shortage_excess_chart = after_df.set_index("store_id")[["shortage", "excess"]]
         st.bar_chart(shortage_excess_chart)
 
-    except urllib.error.URLError as err:
-        st.error(
-            f"❌ Unable to connect to backend server at `{API_BASE_URL}`. "
-            f"Please make sure FastAPI is running (`python -m uvicorn backend.main:app --port 8000`).\n\n"
-            f"Error details: {err}"
-        )
+    except FileNotFoundError as fnf_err:
+        st.error(f"📁 **Dataset File Error:** {fnf_err}")
     except Exception as exc:
-        st.error(f"❌ An error occurred during simulation: {exc}")
+        st.error(f"❌ **An error occurred during simulation:** {exc}")
 
 else:
     st.info("👈 Adjust parameters in the sidebar and click **Run** or **Simulate Promotion** to analyze allocations.")
