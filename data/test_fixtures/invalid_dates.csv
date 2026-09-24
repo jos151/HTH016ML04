@@ -1,0 +1,3 @@
+date,store_id,sku_id,units_sold,data_type
+not-a-date,STORE_1,SKU_01,10.0,SYNTHETIC_TEST_DATA
+2023-99-99,STORE_2,SKU_01,15.0,SYNTHETIC_TEST_DATA

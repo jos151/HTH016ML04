@@ -84,6 +84,19 @@ def _check_duplicates(df: pd.DataFrame) -> None:
         )
 
 
+def validate_sales_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Validates an in-memory DataFrame against demand data constraints without mutating input."""
+    if df.empty:
+        raise ValueError("Provided sales DataFrame is empty.")
+    df_copy = df.copy(deep=True)
+    _validate_columns(df_copy)
+    _validate_non_empty_identifiers(df_copy)
+    df_copy["date"] = _validate_and_parse_dates(df_copy)
+    df_copy["units_sold"] = _validate_units_sold(df_copy)
+    _check_duplicates(df_copy)
+    return df_copy
+
+
 def load_demand_data(
     file_path: Optional[Union[str, Path]] = None,
     store_ids: Optional[List[str]] = None,
@@ -115,7 +128,14 @@ def load_demand_data(
     if not target_path.exists():
         raise FileNotFoundError(f"Sales dataset not found at: {target_path}")
 
-    df = pd.read_csv(target_path)
+    suffix = target_path.suffix.lower()
+    if suffix not in (".csv", ".xlsx", ".xls"):
+        raise ValueError(f"Unsupported file type '{suffix}'. Supported formats: .csv, .xlsx, .xls")
+
+    if suffix in (".xlsx", ".xls"):
+        df = pd.read_excel(target_path)
+    else:
+        df = pd.read_csv(target_path)
 
     # Standardize column naming variations if applicable
     rename_cols = {}

@@ -37,9 +37,16 @@ def calculate_forecast_metrics(
             f"Length mismatch: actual has {len(y_true)} items, predicted has {len(y_pred)} items."
         )
 
+    if np.isnan(y_true).any() or np.isnan(y_pred).any():
+        raise ValueError("Actual or predicted values contain NaN.")
+
+    if (y_true < 0).any():
+        raise ValueError("Actual demand values cannot be negative.")
+
     errors = np.abs(y_true - y_pred)
     mae = float(np.mean(errors))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    bias = float(np.mean(y_pred - y_true))
 
     sum_actual = float(np.sum(y_true))
     if sum_actual > 0:
@@ -52,6 +59,7 @@ def calculate_forecast_metrics(
         "mae": round(mae, 4),
         "rmse": round(rmse, 4),
         "wape": round(wape, 4),
+        "bias": round(bias, 4),
     }
 
 
