@@ -6,18 +6,28 @@ compute constrained inventory allocations, and run scenario simulations without 
 """
 
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 import requests
 import streamlit as st
 
-# Attempt in-process TestClient fallback for resilient execution in sandboxed / non-network environments
+# Ensure repository root is on sys.path so backend package is always importable anywhere
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Attempt in-process TestClient fallback for resilient execution in Streamlit Cloud / standalone environments
+_inprocess_client: Optional[Any] = None
+_inprocess_err: Optional[str] = None
 try:
     from starlette.testclient import TestClient
     from backend.main import app as fastapi_app
-    _inprocess_client: Optional[TestClient] = TestClient(fastapi_app)
-except Exception:
+    _inprocess_client = TestClient(fastapi_app)
+except Exception as exc:
     _inprocess_client = None
+    _inprocess_err = str(exc)
 
 # Backend service configuration
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
@@ -49,7 +59,10 @@ def fetch_backend_health() -> Tuple[bool, Optional[Dict[str, Any]], Optional[str
         except Exception as exc:
             return False, None, str(exc)
 
-    return False, None, f"Failed to connect to backend service at {API_BASE_URL}"
+    err_msg = f"Failed to connect to backend service at {API_BASE_URL}"
+    if _inprocess_err:
+        err_msg += f" (In-process fallback error: {_inprocess_err})"
+    return False, None, err_msg
 
 
 def call_allocate_api(
