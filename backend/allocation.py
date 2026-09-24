@@ -291,6 +291,149 @@ def allocate_inventory_lp(
     return result_df
 
 
+def allocate_sku_inventory(
+    forecast_df: pd.DataFrame,
+    inventory_by_sku: Optional[Dict[str, float]] = None,
+    total_available_units: Optional[float] = None,
+    store_priorities: Optional[Dict[str, float]] = None,
+    sku_priorities: Optional[Dict[str, float]] = None,
+    allocation_method: str = "proportional",
+    warehouse_id: str = "WH_CENTRAL",
+) -> pd.DataFrame:
+    """Performs multi-item inventory allocation at the store-SKU grain.
+
+    Allocation Grain:
+        warehouse_id + sku_id + store_id + allocation_date
+
+    Parameters:
+        forecast_df: DataFrame with store_id, sku_id, forecast_date, predicted_units.
+        inventory_by_sku: Available inventory units by SKU. If not provided and
+                          total_available_units is given, total units are partitioned
+                          proportionally to SKU demand.
+        total_available_units: Total warehouse supply fallback.
+        store_priorities: Optional priority multiplier per store (default: 1.0).
+        sku_priorities: Optional priority multiplier per SKU (default: 1.0).
+        allocation_method: 'proportional' (default) or 'lp'.
+        warehouse_id: Upstream warehouse identifier (default: 'WH_CENTRAL').
+
+    Returns:
+        pd.DataFrame with columns:
+            warehouse_id, allocation_date, store_id, sku_id, forecasted_demand,
+            available_sku_inventory, allocated_units, shortage, excess,
+            fulfillment_percentage, allocation_method, priority_weight
+    """
+    output_cols = [
+        "warehouse_id",
+        "allocation_date",
+        "store_id",
+        "sku_id",
+        "forecasted_demand",
+        "available_sku_inventory",
+        "allocated_units",
+        "shortage",
+        "excess",
+        "fulfillment_percentage",
+        "allocation_method",
+        "priority_weight",
+    ]
+
+    if forecast_df.empty:
+        return pd.DataFrame(columns=output_cols)
+
+    req_cols = ["store_id", "sku_id", "predicted_units"]
+    for c in req_cols:
+        if c not in forecast_df.columns:
+            raise ValueError(f"forecast_df must contain '{c}' column.")
+
+    work_df = forecast_df.copy()
+    if "forecast_date" not in work_df.columns:
+        work_df["forecast_date"] = pd.Timestamp.now().strftime("%Y-%m-%d")
+
+    alloc_date = str(work_df["forecast_date"].iloc[0])
+    priorities = store_priorities or {}
+
+    # Calculate aggregate demand per SKU
+    sku_demands = work_df.groupby("sku_id")["predicted_units"].sum().to_dict()
+    total_net_demand = sum(sku_demands.values())
+
+    # Determine available inventory per SKU
+    sku_inventory_map: Dict[str, float] = {}
+    if inventory_by_sku is not None:
+        for s, d in sku_demands.items():
+            sku_inventory_map[str(s)] = float(inventory_by_sku.get(str(s), 0.0))
+    elif total_available_units is not None:
+        if total_available_units < 0:
+            raise ValueError("total_available_units must be non-negative.")
+        # Proportionally divide warehouse total among SKUs
+        for s, d in sku_demands.items():
+            share = (d / total_net_demand) if total_net_demand > 0 else (1.0 / max(1, len(sku_demands)))
+            sku_inventory_map[str(s)] = float(total_available_units * share)
+    else:
+        # Default: full fulfillment if unconstrained
+        for s, d in sku_demands.items():
+            sku_inventory_map[str(s)] = float(d)
+
+    all_records = []
+
+    # Allocate independently per SKU across stores
+    for sku_id, sku_sub_df in work_df.groupby("sku_id"):
+        sku_str = str(sku_id)
+        avail_sku = sku_inventory_map.get(sku_str, 0.0)
+
+        # Aggregate store demand for this SKU
+        store_sku = sku_sub_df.groupby("store_id", as_index=False)["predicted_units"].sum()
+        store_sku["store_id"] = store_sku["store_id"].astype(str)
+        store_sku = store_sku.sort_values("store_id").reset_index(drop=True)
+
+        # Apply priority weights if configured
+        if priorities:
+            weights = store_sku["store_id"].map(lambda s: max(0.1, float(priorities.get(s, 1.0))))
+            weighted_df = store_sku.copy()
+            weighted_df["predicted_units"] = weighted_df["predicted_units"] * weights
+        else:
+            weighted_df = store_sku
+
+        # Run allocation method
+        if allocation_method == "lp":
+            alloc_res = allocate_inventory_lp(weighted_df, total_available_units=avail_sku)
+        else:
+            alloc_res = allocate_inventory(weighted_df, total_available_units=avail_sku)
+
+        # Merge results back with original unweighted demand
+        for _, r in store_sku.iterrows():
+            st_id = str(r["store_id"])
+            orig_dem = int(round(float(r["predicted_units"])))
+            alloc_row = alloc_res.loc[alloc_res["store_id"] == st_id]
+
+            if not alloc_row.empty:
+                alloc_u = min(orig_dem, int(alloc_row["allocated_units"].iloc[0]))
+            else:
+                alloc_u = 0
+
+            short_u = max(0, orig_dem - alloc_u)
+            excess_u = max(0, alloc_u - orig_dem)
+            p_weight = float(priorities.get(st_id, 1.0))
+            f_pct = round((alloc_u / orig_dem * 100.0), 1) if orig_dem > 0 else 100.0
+
+            all_records.append({
+                "warehouse_id": warehouse_id,
+                "allocation_date": alloc_date,
+                "store_id": st_id,
+                "sku_id": sku_str,
+                "forecasted_demand": orig_dem,
+                "available_sku_inventory": int(round(avail_sku)),
+                "allocated_units": alloc_u,
+                "shortage": short_u,
+                "excess": excess_u,
+                "fulfillment_percentage": f_pct,
+                "allocation_method": allocation_method,
+                "priority_weight": p_weight,
+            })
+
+    result_df = pd.DataFrame(all_records, columns=output_cols)
+    return result_df
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("INVENTORY ALLOCATION - MANDATORY WORKED EXAMPLE CHECK")

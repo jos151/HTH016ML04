@@ -3,24 +3,54 @@ FastAPI application entrypoint and API router definitions for retail demand
 forecasting, inventory allocation, and scenario simulation.
 """
 
-from typing import Dict, List, Optional
-from fastapi import FastAPI, HTTPException, Query, status
+from typing import Any, Dict, List, Optional
+from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.data_loader import load_demand_data, STORE_IDS
-from backend.forecasting import forecast_demand
-from backend.allocation import allocate_inventory, allocate_inventory_lp, get_allocation_summary
+from backend.data_loader import (
+    load_demand_data,
+    STORE_IDS,
+    SKU_IDS,
+    get_data_quality_report,
+    validate_uploaded_sales_data,
+)
+from backend.forecasting import (
+    forecast_demand,
+    forecast_demand_with_bounds,
+    calculate_forecast_metrics,
+)
+from backend.allocation import (
+    allocate_inventory,
+    allocate_inventory_lp,
+    allocate_sku_inventory,
+    get_allocation_summary,
+)
+from backend.inventory_planning import (
+    calculate_safety_stock_and_reorder,
+    calculate_business_cost_impact,
+    calculate_allocation_fairness,
+)
+from backend.reports import generate_excel_report, generate_inventory_template
 from backend.models import (
     HealthResponse,
     ForecastItem,
+    ForecastItemWithBounds,
     AllocationRequest,
     AllocationResponse,
+    SkuAllocationRequest,
+    SkuAllocationResponse,
+    SkuAllocationItem,
     SimulationRequest,
     SimulationResponse,
     ScenarioResult,
     StoreAllocationResult,
     AllocationSummary,
+    SafetyStockRequest,
+    SafetyStockResponse,
+    SafetyStockItem,
+    DataQualityResponse,
+    MetadataResponse,
 )
 
 app = FastAPI(
@@ -308,6 +338,248 @@ def post_simulate(payload: SimulationRequest) -> SimulationResponse:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Simulation failed: {exc}",
+        )
+
+
+@app.get("/metadata", response_model=MetadataResponse)
+def get_metadata() -> MetadataResponse:
+    """Returns catalog of active stores, SKUs, product categories, and date bounds."""
+    try:
+        df = load_demand_data()
+        stores = sorted(df["store_id"].unique().tolist())
+        skus = sorted(df["sku_id"].unique().tolist())
+        # Canonical retail categories associated with project SKUs
+        categories = ["Electronics", "Apparel", "Home & Kitchen", "Grocery", "Health & Personal Care"]
+        return MetadataResponse(
+            stores=stores,
+            skus=skus,
+            categories=categories,
+            min_date=str(df["date"].min()),
+            max_date=str(df["date"].max()),
+            total_rows=int(len(df)),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch metadata: {exc}",
+        )
+
+
+@app.get("/stores", response_model=List[str])
+def get_stores() -> List[str]:
+    """Returns active store identifiers."""
+    try:
+        df = load_demand_data()
+        return sorted(df["store_id"].unique().tolist())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch stores: {exc}",
+        )
+
+
+@app.get("/skus", response_model=List[str])
+def get_skus() -> List[str]:
+    """Returns active SKU identifiers."""
+    try:
+        df = load_demand_data()
+        return sorted(df["sku_id"].unique().tolist())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch SKUs: {exc}",
+        )
+
+
+@app.get("/forecast/bounds", response_model=List[ForecastItemWithBounds])
+def get_forecast_with_bounds(
+    horizon_days: int = Query(default=7, ge=1, le=365),
+    is_holiday_week: bool = Query(default=False),
+    promotion_store: Optional[str] = Query(default=None),
+    promotion_multiplier: Optional[float] = Query(default=None),
+    confidence_level: float = Query(default=0.90, ge=0.50, le=0.99),
+) -> List[ForecastItemWithBounds]:
+    """Generates demand forecasts augmented with empirical confidence bounds."""
+    promo_boost = None
+    if promotion_store is not None or promotion_multiplier is not None:
+        if promotion_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="promotion_store must be provided when promotion_multiplier is specified.",
+            )
+        if promotion_multiplier is None:
+            promotion_multiplier = 1.30
+        if promotion_multiplier < 1.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"promotion_multiplier must be >= 1.0, got {promotion_multiplier}",
+            )
+        promo_boost = {promotion_store: float(promotion_multiplier)}
+
+    try:
+        raw_df = load_demand_data()
+        fc_df = forecast_demand_with_bounds(
+            df=raw_df,
+            horizon_days=horizon_days,
+            promo_boost=promo_boost,
+            is_holiday_week=is_holiday_week,
+            confidence_level=confidence_level,
+        )
+        return [ForecastItemWithBounds(**r) for r in fc_df.to_dict(orient="records")]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Forecasting with bounds failed: {exc}",
+        )
+
+
+@app.post("/allocate/sku", response_model=SkuAllocationResponse)
+def post_allocate_sku(payload: SkuAllocationRequest) -> SkuAllocationResponse:
+    """Performs multi-item constrained allocation at the store-SKU grain."""
+    if payload.total_available_units is not None and payload.total_available_units < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="total_available_units must be non-negative.",
+        )
+    if payload.method not in ["proportional", "lp"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown method '{payload.method}'. Supported: ['proportional', 'lp'].",
+        )
+
+    try:
+        raw_df = load_demand_data()
+        fc_df = forecast_demand(
+            df=raw_df,
+            horizon_days=payload.horizon_days,
+            promo_boost=payload.promo_boost,
+            is_holiday_week=payload.is_holiday_week,
+        )
+
+        sku_alloc_df = allocate_sku_inventory(
+            forecast_df=fc_df,
+            inventory_by_sku=payload.inventory_by_sku,
+            total_available_units=payload.total_available_units,
+            store_priorities=payload.store_priorities,
+            sku_priorities=payload.sku_priorities,
+            allocation_method=payload.method,
+        )
+
+        # Build overall summary
+        tot_d = float(sku_alloc_df["forecasted_demand"].sum()) if not sku_alloc_df.empty else 0.0
+        tot_a = float(sku_alloc_df["allocated_units"].sum()) if not sku_alloc_df.empty else 0.0
+        tot_s = float(sku_alloc_df["shortage"].sum()) if not sku_alloc_df.empty else 0.0
+        tot_e = float(sku_alloc_df["excess"].sum()) if not sku_alloc_df.empty else 0.0
+        avail = float(payload.total_available_units or tot_a)
+        rem = max(0.0, avail - tot_a)
+
+        summary = AllocationSummary(
+            total_forecasted_demand=tot_d,
+            total_available_units=avail,
+            total_allocated_units=tot_a,
+            total_shortage=tot_s,
+            total_excess=tot_e,
+            remaining_inventory=rem,
+        )
+
+        records = [SkuAllocationItem(**r) for r in sku_alloc_df.to_dict(orient="records")]
+        return SkuAllocationResponse(
+            status="success",
+            method=payload.method,
+            allocations=records,
+            summary=summary,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SKU allocation failed: {exc}",
+        )
+
+
+@app.post("/safety-stock", response_model=SafetyStockResponse)
+def post_safety_stock(payload: SafetyStockRequest) -> SafetyStockResponse:
+    """Calculates safety stock, reorder points, and replenishment urgency."""
+    try:
+        raw_df = load_demand_data()
+        rec_df = calculate_safety_stock_and_reorder(
+            historical_df=raw_df,
+            current_inventory=payload.current_inventory,
+            lead_time_days=payload.lead_time_days,
+            target_service_level=payload.target_service_level,
+            min_order_qty=payload.min_order_qty,
+            pack_size=payload.pack_size,
+        )
+        items = [SafetyStockItem(**r) for r in rec_df.to_dict(orient="records")]
+        return SafetyStockResponse(recommendations=items)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Safety stock calculation failed: {exc}",
+        )
+
+
+@app.get("/data-quality", response_model=DataQualityResponse)
+def get_data_quality() -> DataQualityResponse:
+    """Returns dataset health metrics, grid completeness, and validation diagnostics."""
+    try:
+        report = get_data_quality_report()
+        return DataQualityResponse(**report)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Data quality audit failed: {exc}",
+        )
+
+
+@app.post("/reports/export")
+def post_export_report(payload: AllocationRequest) -> Response:
+    """Generates an 8-worksheet Excel workbook containing end-to-end allocation results."""
+    try:
+        raw_df = load_demand_data()
+        fc_df = forecast_demand(
+            df=raw_df,
+            horizon_days=payload.horizon_days,
+            promo_boost=payload.promo_boost,
+            is_holiday_week=payload.is_holiday_week,
+        )
+        if payload.method == "lp":
+            alloc_df = allocate_inventory_lp(fc_df, total_available_units=payload.total_available_units)
+        else:
+            alloc_df = allocate_inventory(fc_df, total_available_units=payload.total_available_units)
+
+        sku_alloc_df = allocate_sku_inventory(fc_df, total_available_units=payload.total_available_units, allocation_method=payload.method)
+        summary = alloc_df.attrs.get("summary", get_allocation_summary(alloc_df, payload.total_available_units))
+
+        excel_bytes = generate_excel_report(
+            forecast_df=fc_df,
+            allocation_df=alloc_df,
+            sku_allocation_df=sku_alloc_df,
+            summary_dict=summary,
+            scenario_assumptions={
+                "Available Inventory": payload.total_available_units,
+                "Allocation Method": payload.method,
+                "Horizon (Days)": payload.horizon_days,
+                "Holiday Uplift": payload.is_holiday_week,
+                "Promotions": str(payload.promo_boost or "None"),
+            },
+        )
+
+        headers = {
+            "Content-Disposition": 'attachment; filename="inventory_allocation_report.xlsx"'
+        }
+        return Response(
+            content=excel_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Report export failed: {exc}",
         )
 
 

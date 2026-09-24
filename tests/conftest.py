@@ -1,10 +1,10 @@
-"""
-Shared pytest fixtures and test environment setup.
-"""
-
+import os
 from pathlib import Path
 import pytest
 import pandas as pd
+
+# Ensure local test client requests bypass any system proxy
+os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 
 
 @pytest.fixture(scope="session")

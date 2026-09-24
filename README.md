@@ -184,21 +184,24 @@ The benchmark supply-chain rationing case can be verified directly:
 HTH016ML04/
 ├── backend/
 │   ├── __init__.py           # Package initialization
-│   ├── allocation.py         # Proportional (Largest-Remainder) & PuLP LP allocation
+│   ├── allocation.py         # Proportional, PuLP MILP, & multi-item store-SKU allocation
 │   ├── config.py             # Configuration and path resolution
-│   ├── data_loader.py        # Ingestion, validation, and zero-imputed calendar grids
-│   ├── forecasting.py        # 7-day rolling baseline, seasonality, promo & holiday lifts
-│   ├── main.py               # FastAPI application routes (/health, /forecast, /allocate, /simulate)
-│   └── models.py             # Pydantic V2 schemas and response contracts
+│   ├── data_loader.py        # Ingestion, validation, calendar grids, & data quality audit
+│   ├── forecasting.py        # Rolling baseline, seasonality, lifts, & uncertainty bounds
+│   ├── inventory_planning.py # Safety stock, ROP, economic impact, & Gini fairness metrics
+│   ├── main.py               # FastAPI application routes (core, analytics, and reporting)
+│   ├── models.py             # Pydantic V2 schemas and response contracts
+│   └── reports.py            # Multi-worksheet Excel workbook generation
 ├── frontend/
 │   ├── __init__.py           # Package initialization
-│   └── app.py                # Streamlit dashboard with KPI cards, charts, and simulation tabs
+│   └── app.py                # 11-section enterprise Streamlit decision-support platform
 ├── data/
 │   ├── processed/            # Canonical clean datasets (sales.csv: 36,550 records)
 │   ├── raw/                  # Source POS transactions (retail_store_inventory.csv)
 │   ├── test_fixtures/        # 12 synthetic deterministic testing scenario CSVs
 │   └── excel/                # 10 enterprise analytical Excel workbooks
 ├── reports/
+│   ├── ADVANCED_UI_INSPECTION_REPORT.md # Full architecture, endpoint & UI inspection
 │   ├── EXCEL_DATASET_CREATION_REPORT.md # Documentation of Excel datasets
 │   └── SOURCE_DATA_AUDIT.md             # Exploratory analysis of source transactions
 ├── scripts/
@@ -207,6 +210,7 @@ HTH016ML04/
 │   └── prepare_dataset.py               # Raw transaction ETL pipeline
 ├── tests/
 │   ├── conftest.py           # Shared test fixtures and TestClient setup
+│   ├── test_advanced_features.py # 14 tests: uncertainty, store-SKU allocation, safety stock, Excel
 │   ├── test_allocation.py    # 24 tests: proportional math, PuLP MILP, quotas, rounding
 │   ├── test_api.py           # 18 tests: HTTP endpoints, validation codes, error paths
 │   ├── test_data_loader.py   # 13 tests: schemas, date parsing, missing date zero-filling
@@ -394,7 +398,10 @@ pytest tests/test_data_loader.py -v
 # Forecasting logic tests
 pytest tests/test_forecasting.py -v
 
-# Allocation algorithms tests (Proportional & PuLP LP)
+# Advanced features & enterprise tests
+pytest tests/test_advanced_features.py -v
+
+# Allocation algorithms tests (Proportional, PuLP LP, & store-SKU)
 pytest tests/test_allocation.py -v
 
 # FastAPI REST API contract tests
@@ -405,14 +412,15 @@ pytest tests/test_pipeline.py -v
 ```
 
 ### Test Suite Summary
-- **Total Test Cases:** 85
-- **Passing:** 85 (100% pass rate)
+- **Total Test Cases:** 99
+- **Passing:** 99 (100% pass rate across all suites)
 - **Key Invariants Enforced:**
   - Non-negative forecasts ($\hat{y} \ge 0$).
   - Total allocation never exceeds available supply ($\sum A_i \le C$).
   - No individual store receives more than its demand ($A_i \le D_i$).
   - Allocation plus shortage strictly balances demand ($A_i + S_i = D_i$).
   - Rounding remains strictly integer-valued ($A_i \in \mathbb{Z}_{\ge 0}$).
+  - Multi-item store-SKU rationing respects both per-SKU and total capacity.
 
 ---
 

@@ -3,6 +3,7 @@ Demand forecasting models, baseline calculation, seasonality, cold-start handlin
 and chronological evaluation metrics.
 """
 
+import math
 from pathlib import Path
 import sys
 from typing import Dict, Optional, Tuple, Union
@@ -182,6 +183,91 @@ def forecast_demand(
     result_df["predicted_units"] = result_df["predicted_units"].fillna(0.0).clip(lower=0.0)
 
     return result_df
+
+
+def forecast_demand_with_bounds(
+    df: pd.DataFrame,
+    horizon_days: int = 7,
+    promo_boost: Optional[Dict[str, float]] = None,
+    is_holiday_week: bool = False,
+    confidence_level: float = 0.90,
+) -> pd.DataFrame:
+    """Generates demand forecasts augmented with empirical uncertainty bounds.
+
+    Bounds are calculated using recent historical residual spreads for each store-SKU
+    time-series. When historical volatility is unobserved or low, applies a safe 15%
+    empirical cushion.
+
+    Returns:
+        pd.DataFrame with columns:
+            store_id, sku_id, forecast_date, baseline_units, promo_multiplier,
+            holiday_multiplier, predicted_units, lower_confidence_bound,
+            upper_confidence_bound, confidence_level, uncertainty_risk
+    """
+    fc_df = forecast_demand(
+        df=df,
+        horizon_days=horizon_days,
+        promo_boost=promo_boost,
+        is_holiday_week=is_holiday_week,
+    )
+    if fc_df.empty:
+        cols = list(fc_df.columns) + [
+            "lower_confidence_bound",
+            "upper_confidence_bound",
+            "confidence_level",
+            "uncertainty_risk",
+        ]
+        return pd.DataFrame(columns=cols)
+
+    # Compute series standard deviations from historical sales
+    std_map: Dict[Tuple[str, str], float] = {}
+    if not df.empty and "units_sold" in df.columns:
+        grouped = df.groupby(["store_id", "sku_id"])["units_sold"]
+        for key, vals in grouped:
+            tail_vals = vals.tail(14)
+            s = float(tail_vals.std(ddof=1)) if len(tail_vals) > 1 else 0.0
+            std_map[(str(key[0]), str(key[1]))] = s if not math.isnan(s) else 0.0
+
+    # Critical multiplier based on confidence_level (default 0.90 -> 1.645)
+    z_factor = 1.645 if confidence_level >= 0.90 else (1.282 if confidence_level >= 0.80 else 1.0)
+
+    lower_bounds = []
+    upper_bounds = []
+    risks = []
+
+    for _, row in fc_df.iterrows():
+        pred = float(row["predicted_units"])
+        key = (str(row["store_id"]), str(row["sku_id"]))
+        std_val = std_map.get(key, 0.0)
+
+        # Margin: either Z * historical std or minimum 15% of prediction
+        margin = max(std_val * z_factor, pred * 0.15) if pred > 0 else 0.0
+        low = max(0.0, round(pred - margin, 2))
+        high = round(pred + margin, 2)
+
+        # Invariant checks
+        if low > pred:
+            low = pred
+        if high < pred:
+            high = pred
+
+        rel_spread = (high - low) / pred if pred > 0 else 0.0
+        if rel_spread < 0.25:
+            risk = "Low"
+        elif rel_spread < 0.50:
+            risk = "Medium"
+        else:
+            risk = "High"
+
+        lower_bounds.append(low)
+        upper_bounds.append(high)
+        risks.append(risk)
+
+    fc_df["lower_confidence_bound"] = lower_bounds
+    fc_df["upper_confidence_bound"] = upper_bounds
+    fc_df["confidence_level"] = round(confidence_level, 2)
+    fc_df["uncertainty_risk"] = risks
+    return fc_df
 
 
 if __name__ == "__main__":

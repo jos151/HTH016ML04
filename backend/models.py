@@ -2,7 +2,7 @@
 Data schemas and domain models for demand forecasting, inventory allocation, and simulation API.
 """
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -124,3 +124,109 @@ class SimulationResponse(BaseModel):
     adjusted: ScenarioResult
     demand_lift_percentage: float
     shortage_change: float
+
+
+class ForecastItemWithBounds(ForecastItem):
+    """Forecast item augmented with empirical uncertainty bounds."""
+    lower_confidence_bound: float = Field(default=0.0, description="Lower empirical confidence bound")
+    upper_confidence_bound: float = Field(default=0.0, description="Upper empirical confidence bound")
+    confidence_level: float = Field(default=0.90, description="Nominal confidence level")
+    uncertainty_risk: str = Field(default="Low", description="Uncertainty risk classification: Low, Medium, High")
+
+
+class SkuAllocationItem(BaseModel):
+    """Store-SKU level allocation outcome."""
+    warehouse_id: str
+    allocation_date: str
+    store_id: str
+    sku_id: str
+    forecasted_demand: int
+    available_sku_inventory: int
+    allocated_units: int
+    shortage: int
+    excess: int
+    fulfillment_percentage: float
+    allocation_method: str
+    priority_weight: float
+
+
+class SkuAllocationRequest(BaseModel):
+    """Request payload for store-SKU granular allocation."""
+    total_available_units: Optional[float] = Field(default=1000.0, ge=0.0)
+    inventory_by_sku: Optional[Dict[str, float]] = Field(default=None)
+    store_priorities: Optional[Dict[str, float]] = Field(default=None)
+    sku_priorities: Optional[Dict[str, float]] = Field(default=None)
+    method: Literal["proportional", "lp"] = Field(default="proportional")
+    horizon_days: int = Field(default=7, ge=1, le=365)
+    is_holiday_week: bool = Field(default=False)
+    promo_boost: Optional[Dict[str, float]] = Field(default=None)
+
+
+class SkuAllocationResponse(BaseModel):
+    """Response payload for store-SKU granular allocation."""
+    status: str
+    method: str
+    allocations: List[SkuAllocationItem]
+    summary: AllocationSummary
+
+
+class SafetyStockItem(BaseModel):
+    """Safety stock and replenishment recommendation per SKU."""
+    sku_id: str
+    avg_daily_demand: float
+    demand_std_dev: float
+    lead_time_days: int
+    lead_time_demand: float
+    safety_stock: int
+    reorder_point: int
+    current_inventory: int
+    suggested_order_qty: int
+    days_of_cover: float
+    urgency: str
+    recommended_action: str
+    service_level_target: float
+    z_score: float
+
+
+class SafetyStockRequest(BaseModel):
+    """Request for safety stock calculation."""
+    lead_time_days: int = Field(default=7, ge=1, le=60)
+    target_service_level: float = Field(default=0.95, ge=0.50, le=0.999)
+    min_order_qty: int = Field(default=10, ge=1)
+    pack_size: int = Field(default=5, ge=1)
+    current_inventory: Optional[Dict[str, float]] = Field(default=None)
+
+
+class SafetyStockResponse(BaseModel):
+    """Response containing replenishment recommendations."""
+    recommendations: List[SafetyStockItem]
+
+
+class DataQualityResponse(BaseModel):
+    """Audit metrics for sales dataset health."""
+    status: str
+    dataset_source: str
+    is_real_data: bool
+    row_count: int
+    date_range: Dict[str, Any]
+    store_count: int
+    sku_count: int
+    missing_values: Dict[str, int]
+    duplicate_count: int
+    negative_sales_count: int
+    zero_sales_count: int
+    zero_sales_percentage: float
+    missing_combination_count: int
+    warnings: List[str]
+    stores: List[str]
+    skus: List[str]
+
+
+class MetadataResponse(BaseModel):
+    """Dataset entity catalog metadata."""
+    stores: List[str]
+    skus: List[str]
+    categories: List[str]
+    min_date: str
+    max_date: str
+    total_rows: int

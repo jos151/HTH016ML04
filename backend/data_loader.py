@@ -209,6 +209,161 @@ def load_demand_data(
     return result
 
 
+def get_data_quality_report(df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """Generates a comprehensive diagnostic data quality audit of the sales dataset."""
+    target_df = df if df is not None else load_demand_data()
+
+    if target_df.empty:
+        return {
+            "status": "Failed",
+            "dataset_source": "data/processed/sales.csv",
+            "is_real_data": False,
+            "row_count": 0,
+            "date_range": {"min": None, "max": None, "days": 0},
+            "store_count": 0,
+            "sku_count": 0,
+            "missing_values": {},
+            "duplicate_count": 0,
+            "negative_sales_count": 0,
+            "zero_sales_count": 0,
+            "zero_sales_percentage": 0.0,
+            "missing_combination_count": 0,
+            "warnings": ["Dataset is empty."],
+        }
+
+    row_count = int(len(target_df))
+    min_date = str(target_df["date"].min())
+    max_date = str(target_df["date"].max())
+    unique_dates = int(target_df["date"].nunique())
+    store_count = int(target_df["store_id"].nunique())
+    sku_count = int(target_df["sku_id"].nunique())
+
+    missing_vals = {col: int(target_df[col].isnull().sum()) for col in target_df.columns}
+    dup_count = int(target_df.duplicated(subset=["date", "store_id", "sku_id"]).sum())
+
+    numeric_units = pd.to_numeric(target_df["units_sold"], errors="coerce")
+    neg_count = int((numeric_units < 0).sum())
+    zero_count = int((numeric_units == 0).sum())
+    zero_pct = round((zero_count / max(1, row_count)) * 100.0, 2)
+
+    # Check completeness against Cartesian product
+    expected_rows = unique_dates * store_count * sku_count
+    missing_combos = max(0, expected_rows - row_count)
+
+    warnings = []
+    if missing_combos > 0:
+        warnings.append(f"Grid incomplete: {missing_combos} date-store-SKU combinations unobserved.")
+    if zero_pct > 40.0:
+        warnings.append(f"High zero-sales frequency ({zero_pct}% of records have 0 units).")
+
+    if neg_count > 0 or dup_count > 0 or any(missing_vals.values()):
+        status = "Failed"
+    elif warnings:
+        status = "Passed with warnings"
+    else:
+        status = "Passed"
+
+    return {
+        "status": status,
+        "dataset_source": "data/processed/sales.csv (Retail Store POS Transactions)",
+        "is_real_data": True,
+        "row_count": row_count,
+        "date_range": {
+            "min": min_date,
+            "max": max_date,
+            "days": unique_dates,
+        },
+        "store_count": store_count,
+        "sku_count": sku_count,
+        "missing_values": missing_vals,
+        "duplicate_count": dup_count,
+        "negative_sales_count": neg_count,
+        "zero_sales_count": zero_count,
+        "zero_sales_percentage": zero_pct,
+        "missing_combination_count": missing_combos,
+        "warnings": warnings,
+        "stores": sorted(target_df["store_id"].unique().tolist()),
+        "skus": sorted(target_df["sku_id"].unique().tolist()),
+    }
+
+
+def validate_uploaded_sales_data(
+    file_bytes: bytes,
+    filename: str,
+) -> Dict[str, Any]:
+    """Validates an uploaded file (CSV or Excel) against the required demand schema."""
+    import io
+
+    clean_name = Path(filename).name.lower()
+    errors = []
+
+    if not (clean_name.endswith(".csv") or clean_name.endswith(".xlsx") or clean_name.endswith(".xls")):
+        return {
+            "valid": False,
+            "filename": filename,
+            "row_count": 0,
+            "errors": [f"Unsupported file format '{Path(filename).suffix}'. Supported: .csv, .xlsx, .xls"],
+            "preview": [],
+            "status": "Failed",
+        }
+
+    try:
+        if clean_name.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(file_bytes))
+        else:
+            df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception as exc:
+        return {
+            "valid": False,
+            "filename": filename,
+            "row_count": 0,
+            "errors": [f"File could not be parsed: {str(exc)}"],
+            "preview": [],
+            "status": "Failed",
+        }
+
+    # 1. Base columns
+    missing_cols = [c for c in REQUIRED_BASE_COLUMNS if c not in df.columns]
+    if missing_cols:
+        errors.append(f"Missing required columns: {', '.join(missing_cols)}")
+
+    if not missing_cols:
+        # 2. Check identifiers
+        if df["store_id"].isnull().any() or (df["store_id"].astype(str).str.strip() == "").any():
+            errors.append("Dataset contains missing or empty store_id entries.")
+        if df["sku_id"].isnull().any() or (df["sku_id"].astype(str).str.strip() == "").any():
+            errors.append("Dataset contains missing or empty sku_id entries.")
+
+        # 3. Check dates
+        parsed_dates = pd.to_datetime(df["date"], errors="coerce", format="mixed")
+        if parsed_dates.isnull().any():
+            errors.append(f"Dataset contains {parsed_dates.isnull().sum()} invalid date values.")
+
+        # 4. Check numeric units
+        numeric_units = pd.to_numeric(df["units_sold"], errors="coerce")
+        if numeric_units.isnull().any():
+            errors.append("Dataset contains non-numeric values in units_sold.")
+        if (numeric_units < 0).any():
+            errors.append(f"Dataset contains {(numeric_units < 0).sum()} negative units_sold rows.")
+
+        # 5. Check duplicates
+        dups = df.duplicated(subset=["date", "store_id", "sku_id"]).sum()
+        if dups > 0:
+            errors.append(f"Detected {dups} duplicate records for [date, store_id, sku_id].")
+
+    is_valid = len(errors) == 0
+    preview_records = df.head(5).to_dict(orient="records") if not df.empty else []
+
+    return {
+        "valid": is_valid,
+        "filename": filename,
+        "row_count": int(len(df)),
+        "errors": errors,
+        "preview": preview_records,
+        "status": "Passed" if is_valid else "Failed",
+    }
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("DEMAND DATA LOADER - MAIN EXECUTION CHECK")
