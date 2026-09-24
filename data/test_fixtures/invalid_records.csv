@@ -1,0 +1,8 @@
+date,store_id,sku_id,units_sold,defect_type
+2023-01-01,STORE_1,SKU_01,10,valid_baseline
+2023-99-99,STORE_1,SKU_02,10,invalid_date
+2023-01-02,STORE_1,SKU_03,-15,negative_units_sold
+2023-01-02,,SKU_04,10,missing_store_id
+2023-01-02,STORE_2,,10,missing_sku_id
+2023-01-01,STORE_1,SKU_01,20,duplicate_key
+2023-01-03,STORE_3,SKU_05,twenty_five,text_in_numeric

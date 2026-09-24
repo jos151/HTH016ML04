@@ -1,0 +1,6 @@
+store_id,store_name,region,capacity_units,priority_weight
+STORE_1,Retail Store S001,East,50000,1.0
+STORE_2,Retail Store S002,East,50000,1.0
+STORE_3,Retail Store S003,South,50000,1.0
+STORE_4,Retail Store S004,West,50000,1.0
+STORE_5,Retail Store S005,East,50000,1.0

@@ -1,0 +1,11 @@
+sku_id,product_name,category,unit_price,priority_weight
+SKU_01,Item P0001,Groceries,54.55,1.0
+SKU_02,Item P0002,Furniture,55.27,1.0
+SKU_03,Item P0003,Groceries,54.89,1.0
+SKU_04,Item P0004,Electronics,55.54,1.0
+SKU_05,Item P0005,Groceries,55.02,1.0
+SKU_06,Item P0006,Groceries,54.77,1.0
+SKU_07,Item P0007,Electronics,54.92,1.0
+SKU_08,Item P0008,Electronics,55.35,1.0
+SKU_09,Item P0009,Furniture,55.16,1.0
+SKU_10,Item P0010,Toys,55.36,1.0

@@ -1,0 +1,133 @@
+{
+  "fixtures": {
+    "normal_demand.csv": {
+      "purpose": "Full fulfillment test case",
+      "available_inventory": 1000,
+      "horizon_days": 7,
+      "is_holiday_week": false,
+      "promo_boost": null,
+      "expected": {
+        "total_shortage": 0.0,
+        "remaining_inventory_gt_zero": true
+      }
+    },
+    "shortage_case.csv": {
+      "purpose": "Proportional scarcity allocation test case (Worked Example)",
+      "available_inventory": 1000,
+      "horizon_days": 1,
+      "is_holiday_week": false,
+      "promo_boost": null,
+      "expected": {
+        "STORE_A_allocated": 417,
+        "STORE_B_allocated": 333,
+        "STORE_C_allocated": 250,
+        "total_shortage": 200.0,
+        "remaining_inventory": 0.0
+      }
+    },
+    "promotion_case.csv": {
+      "purpose": "Targeted promotion test case",
+      "available_inventory": 3000,
+      "horizon_days": 7,
+      "is_holiday_week": false,
+      "promo_boost": {
+        "STORE_B": 1.3
+      },
+      "expected": {
+        "STORE_B_uplift_pct": 30.0,
+        "other_stores_unchanged": true
+      }
+    },
+    "holiday_case.csv": {
+      "purpose": "Holiday uplift test case (+15% across all stores)",
+      "available_inventory": 2000,
+      "horizon_days": 7,
+      "is_holiday_week": true,
+      "promo_boost": null,
+      "expected": {
+        "all_stores_uplift_multiplier": 1.15
+      }
+    },
+    "promotion_and_holiday_case.csv": {
+      "purpose": "Combined marketing promotion and holiday uplift",
+      "available_inventory": 2500,
+      "horizon_days": 7,
+      "is_holiday_week": true,
+      "promo_boost": {
+        "STORE_B": 1.3
+      },
+      "expected": {
+        "STORE_B_combined_multiplier": 1.495,
+        "STORE_A_holiday_multiplier": 1.15
+      }
+    },
+    "zero_demand.csv": {
+      "purpose": "Zero demand boundary condition",
+      "available_inventory": 500,
+      "horizon_days": 7,
+      "is_holiday_week": false,
+      "promo_boost": null,
+      "expected": {
+        "total_demand": 0.0,
+        "total_allocated": 0.0,
+        "total_shortage": 0.0,
+        "remaining_inventory": 500.0
+      }
+    },
+    "zero_inventory.csv": {
+      "purpose": "Zero inventory boundary condition",
+      "available_inventory": 0,
+      "horizon_days": 7,
+      "is_holiday_week": false,
+      "promo_boost": null,
+      "expected": {
+        "total_allocated": 0.0,
+        "shortage_equals_demand": true
+      }
+    },
+    "missing_dates.csv": {
+      "purpose": "Grid completion and missing observation filling",
+      "expected_grid_size": 28,
+      "missing_filled_with_zero": true
+    },
+    "short_history.csv": {
+      "purpose": "Cold-start fallback for series under 7 observations",
+      "horizon_days": 7,
+      "expected": {
+        "no_nan_values": true,
+        "fallback_triggered": true
+      }
+    },
+    "invalid_records.csv": {
+      "purpose": "Negative data loader rejection validation",
+      "defects_tested": [
+        "invalid_date",
+        "negative_units_sold",
+        "missing_store_id",
+        "missing_sku_id",
+        "duplicate_key",
+        "text_in_numeric"
+      ]
+    },
+    "rounding_case.csv": {
+      "purpose": "Discrete largest-remainder integer distribution with ties",
+      "available_inventory": 2,
+      "horizon_days": 1,
+      "expected": {
+        "total_allocated": 2,
+        "max_store_allocation": 1,
+        "deterministic": true
+      }
+    },
+    "dominant_store_case.csv": {
+      "purpose": "Extreme demand skew allocation under inventory scarcity",
+      "available_inventory": 500,
+      "horizon_days": 1,
+      "expected": {
+        "total_allocated": 500,
+        "no_negative_allocations": true,
+        "STORE_A_allocation_within_supply": true
+      }
+    }
+  }
+}

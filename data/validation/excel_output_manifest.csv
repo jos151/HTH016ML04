@@ -1,0 +1,11 @@
+workbook_name,relative_path,workbook_part,sheet_name,row_count,column_count,minimum_date,maximum_date,store_count,sku_count,file_size_bytes,sha256_checksum,validation_status
+01_Historical_Sales_Project_Subset.xlsx,data/excel/01_Historical_Sales_Project_Subset.xlsx,Part 1 of 1,Sales_Data,36550,18,2022-01-01,2024-01-01,5,10,2858100,6d6b036f338fa3551b8d4a63bcf5f4f1f3e2455206b03fdbef0d5bade8427238,VALIDATED_PASSED
+02_Calendar_Holidays.xlsx,data/excel/02_Calendar_Holidays.xlsx,Part 1 of 1,Calendar,731,17,2022-01-01,2024-01-01,5,20,73620,0cd1545f5d05f9a13d98d0cbd6dd1c9166aede51cfee5c3c4647bfb62c40cfb3,VALIDATED_PASSED
+03_Selling_Prices.xlsx,data/excel/03_Selling_Prices.xlsx,Part 1 of 1,Selling_Prices,10500,5,2022-W01,2024-W01,5,20,299030,c71499cffc9736cca712f53ea8c4710164e82f94cc005eca207838c4191db667,VALIDATED_PASSED
+04_Product_Master.xlsx,data/excel/04_Product_Master.xlsx,Part 1 of 1,Products,20,7,N/A,N/A,5,20,9846,14822ddfca37c2385205a3a0ca8b41e13f802ae5cf12fc8b49ea18668389aa93,VALIDATED_PASSED
+05_Store_Master.xlsx,data/excel/05_Store_Master.xlsx,Part 1 of 1,Stores,5,11,2022-01-01,2024-01-01,5,20,9830,51637d2a2f8e00c481b85a7bfb9f8de7a76bc5856f3b0b466e582e1259f0b3ef,VALIDATED_PASSED
+06_Inventory_Input.xlsx,data/excel/06_Inventory_Input.xlsx,Part 1 of 1,Inventory_Input,100,7,2024-01-01,2024-01-01,5,20,12305,cfdd9d624359c561cceb6e250271448df48eff499eb049fb75531aa108af2d99,VALIDATED_PASSED
+07_Promotion_Event_Data.xlsx,data/excel/07_Promotion_Event_Data.xlsx,Part 1 of 1,Event_Data,36550,11,2022-01-01,2024-01-01,5,10,1788783,779e0f729be725e4e8e75392c356c3fa440ceb063981dbbd28a933466850fc31,VALIDATED_PASSED
+08_Training_Validation_Test_Splits.xlsx,data/excel/08_Training_Validation_Test_Splits.xlsx,Part 1 of 1,Training_Data,36550,9,2022-01-01,2024-01-01,5,10,1722330,661676f105edad4439721a20c504c344d4bdfce8678b748745f44661d2491808,VALIDATED_PASSED
+09_Large_Analytical_Sales_Dataset.xlsx,data/excel/09_Large_Analytical_Sales_Dataset.xlsx,Part 1 of 1,Sales_Data,73100,17,2022-01-01,2024-01-01,5,20,6595765,9385d91bb764406c587fb8ff4fa3d7a42c6410a05d11d994e7046e1b5af484b8,VALIDATED_PASSED
+10_Dataset_Validation_Report.xlsx,data/excel/10_Dataset_Validation_Report.xlsx,Part 1 of 1,File_Summary,9,13,2022-01-01,2024-01-01,5,20,16041,b5c395f1e3c98e5698b37c6f4b21c8364631f17fe3b75c8a2852bb077f87a5fa,VALIDATED_PASSED

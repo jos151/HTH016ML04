@@ -1,7 +1,12 @@
 fastapi
 uvicorn
+pydantic
 pandas
 numpy
 scikit-learn
-pulp
 streamlit
+requests
+pytest
+httpx
+pulp
+openpyxl
