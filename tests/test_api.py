@@ -291,3 +291,168 @@ def test_correct_response_fields():
     assert "total_allocated_units" in summary
     assert "total_shortage" in summary
     assert "remaining_inventory" in summary
+
+
+def test_categories_endpoint():
+    """19. Tests GET /categories returns retail categories and SKU mappings."""
+    res = client.get("/categories")
+    assert res.status_code == 200
+    data = res.json()
+    assert "total" in data and "categories" in data
+    assert data["total"] == 5
+    assert len(data["categories"]) == 5
+    cat_names = {c["name"] for c in data["categories"]}
+    assert "Electronics" in cat_names
+    assert "Apparel" in cat_names
+    for cat in data["categories"]:
+        assert "category_id" in cat
+        assert "sku_count" in cat
+        assert len(cat["skus"]) == cat["sku_count"]
+
+
+def test_history_endpoint():
+    """20. Tests GET /history supports pagination, filters, and summary totals."""
+    # Default page 1, size 10
+    res = client.get("/history?page=1&page_size=10")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["page"] == 1
+    assert data["page_size"] == 10
+    assert len(data["items"]) == 10
+    assert data["total"] > 10
+    assert data["total_pages"] >= 1
+    assert "summary" in data
+    assert data["summary"]["total_units_sold"] > 0
+    assert data["is_real_data"] is True
+    assert data["unit"] == "units"
+
+    sample = data["items"][0]
+    for key in ["date", "store_id", "sku_id", "category", "units_sold", "day_of_week", "is_weekend"]:
+        assert key in sample
+
+    # Filtered by store and SKU
+    res_filt = client.get("/history?store_id=STORE_1&sku_id=SKU_01&page_size=5")
+    assert res_filt.status_code == 200
+    d_filt = res_filt.json()
+    assert all(i["store_id"] == "STORE_1" and i["sku_id"] == "SKU_01" for i in d_filt["items"])
+
+
+def test_post_forecast_endpoint():
+    """21. Tests POST /forecast mobile endpoint with category filters and uncertainty bounds."""
+    payload = {
+        "horizon_days": 7,
+        "categories": ["Electronics"],
+        "promo_boost": {"STORE_1": 1.25},
+        "is_holiday_week": True,
+        "confidence_level": 0.90,
+    }
+    res = client.post("/forecast", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert "forecast_items" in data
+    assert "summary" in data
+    assert "model_name" in data
+    assert data["horizon_days"] == 7
+    assert data["is_holiday_week"] is True
+    assert data["unit"] == "units"
+
+    items = data["forecast_items"]
+    assert len(items) > 0
+    # Verified category filtering
+    assert all(i["category"] == "Electronics" for i in items)
+    # Uncertainty bounds presence
+    sample = items[0]
+    assert "lower_confidence_bound" in sample
+    assert "upper_confidence_bound" in sample
+    assert "uncertainty_risk" in sample
+    assert sample["upper_confidence_bound"] >= sample["predicted_units"]
+    assert sample["lower_confidence_bound"] <= sample["predicted_units"]
+
+
+def test_compare_scenarios_endpoint():
+    """22. Tests POST /compare-scenarios returns comparative indicators across scenarios."""
+    payload = {
+        "scenarios": [
+            {
+                "scenario_name": "Conservative Supply",
+                "horizon_days": 7,
+                "total_available_units": 500,
+                "method": "proportional",
+            },
+            {
+                "scenario_name": "Aggressive Holiday Promotion",
+                "horizon_days": 7,
+                "total_available_units": 1500,
+                "method": "proportional",
+                "promo_boost": {"STORE_1": 1.30},
+                "is_holiday_week": True,
+            },
+        ]
+    }
+    res = client.post("/compare-scenarios", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert "scenarios" in data
+    assert len(data["scenarios"]) == 2
+    assert "summary" in data
+    summary = data["summary"]
+    assert "highest_demand_scenario" in summary
+    assert "lowest_shortage_scenario" in summary
+    assert "highest_fulfillment_scenario" in summary
+    assert summary["highest_demand_scenario"] == "Aggressive Holiday Promotion"
+
+
+def test_model_metrics_endpoint():
+    """23. Tests GET /model-metrics returns empirical holdout accuracy indicators."""
+    res = client.get("/model-metrics?eval_window_days=14")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["model_name"] == "7-Day Moving Average with DOW Seasonality"
+    assert data["is_real_data"] is True
+    assert data["evaluation_window_days"] == 14
+    assert data["evaluated_records"] > 0
+
+    overall = data["overall_metrics"]
+    assert "mae" in overall and overall["mae"] >= 0
+    assert "rmse" in overall and overall["rmse"] >= 0
+    assert "wape" in overall and 0 <= overall["wape"] <= 1.0
+    assert "bias" in overall
+    assert "accuracy_percentage" in overall
+
+    sku_metrics = data["sku_metrics"]
+    assert len(sku_metrics) == 10
+    assert all("sku_id" in s and "category" in s and "wape" in s for s in sku_metrics)
+
+
+def test_standard_error_schema():
+    """24. Tests that error responses match the mobile standard error schema with backwards compatibility."""
+    # Negative inventory -> HTTP 422 or 400
+    res = client.post("/allocate", json={"total_available_units": -100, "method": "proportional"})
+    assert res.status_code in [400, 422]
+    data = res.json()
+    assert "error_code" in data
+    assert "message" in data
+    assert "field" in data
+    assert "detail" in data  # Backwards compatibility
+    assert data["error_code"] in ["INVALID_INVENTORY", "VALIDATION_ERROR", "BAD_REQUEST"]
+
+
+def test_extended_allocate_with_sku_breakdown():
+    """25. Tests POST /allocate with SKU inventory breakdown and store priorities."""
+    payload = {
+        "total_available_units": 1200,
+        "method": "proportional",
+        "horizon_days": 7,
+        "include_sku_breakdown": True,
+        "inventory_by_sku": {"SKU_01": 200, "SKU_02": 150},
+        "store_priorities": {"STORE_1": 1.5, "STORE_2": 1.2},
+    }
+    res = client.post("/allocate", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert "allocations" in data
+    assert "summary" in data
+    assert "sku_allocations" in data
+    assert data["sku_allocations"] is not None
+    assert len(data["sku_allocations"]) == 5 * 10  # 5 stores * 10 SKUs
+

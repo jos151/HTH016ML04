@@ -171,7 +171,7 @@ def allocate_inventory_lp(
     shortage_cost: float = 1.0,
     overstock_cost: float = 0.3,
     allow_overstock: bool = False,
-    fallback_on_solver_error: bool = False,
+    fallback_on_solver_error: bool = True,
 ) -> pd.DataFrame:
     """Allocates inventory across stores using integer linear programming (PuLP).
 

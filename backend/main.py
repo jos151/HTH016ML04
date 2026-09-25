@@ -1,10 +1,10 @@
-"""
-FastAPI application entrypoint and API router definitions for retail demand
-forecasting, inventory allocation, and scenario simulation.
-"""
-
+import math
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, HTTPException, Query, Response, status
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -51,12 +51,30 @@ from backend.models import (
     SafetyStockItem,
     DataQualityResponse,
     MetadataResponse,
+    ErrorResponse,
+    CategoryItem,
+    CategoriesResponse,
+    HistoryRecordItem,
+    HistorySummary,
+    HistoryResponse,
+    MobileForecastRequest,
+    MobileForecastItem,
+    ForecastSummary,
+    MobileForecastResponse,
+    ScenarioInput,
+    CompareScenariosRequest,
+    ScenarioMetricItem,
+    ScenarioComparisonSummary,
+    CompareScenariosResponse,
+    SkuModelMetric,
+    OverallModelMetrics,
+    ModelMetricsResponse,
 )
 
 app = FastAPI(
     title="Inventory-Constrained Demand Forecasting and Allocation API",
     description="REST API for store-SKU demand forecasting, proportional inventory allocation, and scenario simulation.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # Permissive CORS middleware for local hackathon and frontend integration
@@ -67,6 +85,118 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Product catalog category mapping for project SKUs
+SKU_CATEGORY_MAP: Dict[str, str] = {
+    "SKU_01": "Electronics",
+    "SKU_02": "Electronics",
+    "SKU_03": "Apparel",
+    "SKU_04": "Apparel",
+    "SKU_05": "Home & Kitchen",
+    "SKU_06": "Home & Kitchen",
+    "SKU_07": "Grocery",
+    "SKU_08": "Grocery",
+    "SKU_09": "Health & Personal Care",
+    "SKU_10": "Health & Personal Care",
+}
+
+CATEGORY_METADATA = [
+    {"category_id": "CAT_01", "name": "Electronics", "skus": ["SKU_01", "SKU_02"]},
+    {"category_id": "CAT_02", "name": "Apparel", "skus": ["SKU_03", "SKU_04"]},
+    {"category_id": "CAT_03", "name": "Home & Kitchen", "skus": ["SKU_05", "SKU_06"]},
+    {"category_id": "CAT_04", "name": "Grocery", "skus": ["SKU_07", "SKU_08"]},
+    {"category_id": "CAT_05", "name": "Health & Personal Care", "skus": ["SKU_09", "SKU_10"]},
+]
+
+
+# =====================================================================
+# Standardized Error Handling Middleware / Exception Handlers
+# =====================================================================
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Formats Pydantic validation errors into the standard mobile error schema."""
+    errors = exc.errors()
+    first_error = errors[0] if errors else {}
+    loc = first_error.get("loc", [])
+    field_name = str(loc[-1]) if loc else None
+    msg = first_error.get("msg", "Invalid request payload.")
+
+    code = "VALIDATION_ERROR"
+    if field_name:
+        fn_lower = field_name.lower()
+        if "inventory" in fn_lower:
+            code = "INVALID_INVENTORY"
+        elif "horizon" in fn_lower:
+            code = "INVALID_HORIZON"
+        elif "promo" in fn_lower:
+            code = "INVALID_PROMOTION"
+
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error_code": code,
+            "message": msg,
+            "field": field_name,
+            "details": [{"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in errors],
+            "request_id": request.headers.get("x-request-id"),
+            "detail": f"{msg} (got: {first_error.get('input', '')})" if first_error.get("input") is not None else msg,
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Formats HTTP exceptions without exposing filesystem paths or stack traces."""
+    raw_msg = str(exc.detail)
+    clean_msg = re.sub(r'[A-Za-z]:\\[^ \t\n\r]+', '[file]', raw_msg)
+
+    code = "HTTP_ERROR"
+    if exc.status_code == status.HTTP_400_BAD_REQUEST:
+        code = "BAD_REQUEST"
+        low = clean_msg.lower()
+        if "inventory" in low:
+            code = "INVALID_INVENTORY"
+        elif "promo" in low:
+            code = "INVALID_PROMOTION"
+        elif "horizon" in low:
+            code = "INVALID_HORIZON"
+    elif exc.status_code == status.HTTP_404_NOT_FOUND:
+        code = "NOT_FOUND"
+    elif exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+        code = "VALIDATION_ERROR"
+    elif exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+        code = "SERVICE_UNAVAILABLE"
+    elif exc.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR:
+        code = "INTERNAL_SERVER_ERROR"
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error_code": code,
+            "message": clean_msg,
+            "field": None,
+            "details": None,
+            "request_id": request.headers.get("x-request-id"),
+            "detail": clean_msg,
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Shields clients from raw server errors and stack traces."""
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error_code": "INTERNAL_SERVER_ERROR",
+            "message": "An internal server error occurred while processing the request.",
+            "field": None,
+            "details": None,
+            "request_id": request.headers.get("x-request-id"),
+            "detail": "An internal server error occurred while processing the request.",
+        },
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -217,12 +347,27 @@ def post_allocate(payload: AllocationRequest) -> AllocationResponse:
             allocation_df = allocate_inventory_lp(
                 forecast_df=forecast_df,
                 total_available_units=payload.total_available_units,
+                shortage_cost=payload.shortage_cost if payload.shortage_cost is not None else 1.0,
+                overstock_cost=payload.overstock_cost if payload.overstock_cost is not None else 0.3,
+                fallback_on_solver_error=True,
             )
         else:
             allocation_df = allocate_inventory(
                 forecast_df=forecast_df,
                 total_available_units=payload.total_available_units,
             )
+
+        sku_records = None
+        if payload.include_sku_breakdown or payload.inventory_by_sku or payload.store_priorities or payload.sku_priorities:
+            sku_alloc_df = allocate_sku_inventory(
+                forecast_df=forecast_df,
+                inventory_by_sku=payload.inventory_by_sku,
+                total_available_units=payload.total_available_units,
+                store_priorities=payload.store_priorities,
+                sku_priorities=payload.sku_priorities,
+                allocation_method=payload.method,
+            )
+            sku_records = [SkuAllocationItem(**r) for r in sku_alloc_df.to_dict(orient="records")]
 
         summary_dict = allocation_df.attrs.get(
             "summary",
@@ -233,6 +378,11 @@ def post_allocate(payload: AllocationRequest) -> AllocationResponse:
         return AllocationResponse(
             allocations=[StoreAllocationResult(**r) for r in alloc_records],
             summary=AllocationSummary(**summary_dict),
+            sku_allocations=sku_records,
+            method=payload.method,
+            unit="units",
+            dataset_source="data/processed/sales.csv",
+            is_real_data=True,
         )
     except HTTPException:
         raise
@@ -388,6 +538,427 @@ def get_skus() -> List[str]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch SKUs: {exc}",
+        )
+
+
+@app.get(
+    "/categories",
+    response_model=CategoriesResponse,
+    summary="Get product categories",
+    description="Returns product categories and their associated SKU lists.",
+)
+def get_categories() -> CategoriesResponse:
+    """Returns product categories, SKU associations, and total counts."""
+    items = [
+        CategoryItem(
+            category_id=c["category_id"],
+            name=c["name"],
+            sku_count=len(c["skus"]),
+            skus=c["skus"],
+        )
+        for c in CATEGORY_METADATA
+    ]
+    return CategoriesResponse(total=len(items), categories=items)
+
+
+@app.get(
+    "/history",
+    response_model=HistoryResponse,
+    summary="Get paginated historical demand records",
+    description="Returns filtered and paginated historical POS demand records with summary aggregates.",
+)
+def get_history(
+    page: int = Query(default=1, ge=1, description="1-based page index"),
+    page_size: int = Query(default=50, ge=1, le=500, description="Records per page"),
+    store_id: Optional[str] = Query(default=None, description="Filter by store ID"),
+    sku_id: Optional[str] = Query(default=None, description="Filter by SKU ID"),
+    category: Optional[str] = Query(default=None, description="Filter by category name"),
+    start_date: Optional[str] = Query(default=None, description="Filter on or after ISO date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(default=None, description="Filter on or before ISO date (YYYY-MM-DD)"),
+) -> HistoryResponse:
+    """Provides mobile clients with bounded, filtered historical sales records and aggregates."""
+    try:
+        df = load_demand_data()
+        if df.empty:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demand dataset is empty.",
+            )
+
+        filtered = df.copy()
+        if store_id:
+            filtered = filtered[filtered["store_id"] == store_id]
+        if sku_id:
+            filtered = filtered[filtered["sku_id"] == sku_id]
+        if category:
+            matching_skus = [s for s, c in SKU_CATEGORY_MAP.items() if c.lower() == category.lower()]
+            filtered = filtered[filtered["sku_id"].isin(matching_skus)]
+        if start_date:
+            filtered = filtered[filtered["date"] >= start_date]
+        if end_date:
+            filtered = filtered[filtered["date"] <= end_date]
+
+        total_matching = len(filtered)
+        if total_matching > 0:
+            tot_units = round(float(filtered["units_sold"].sum()), 2)
+            avg_units = round(float(filtered["units_sold"].mean()), 2)
+            min_d = str(filtered["date"].min())
+            max_d = str(filtered["date"].max())
+            d_stores = int(filtered["store_id"].nunique())
+            d_skus = int(filtered["sku_id"].nunique())
+        else:
+            tot_units = 0.0
+            avg_units = 0.0
+            min_d = ""
+            max_d = ""
+            d_stores = 0
+            d_skus = 0
+
+        summary = HistorySummary(
+            total_records=total_matching,
+            total_units_sold=tot_units,
+            average_units_per_record=avg_units,
+            min_date=min_d,
+            max_date=max_d,
+            distinct_stores=d_stores,
+            distinct_skus=d_skus,
+        )
+
+        total_pages = max(1, math.ceil(total_matching / page_size))
+        offset = (page - 1) * page_size
+        page_df = filtered.iloc[offset : offset + page_size]
+
+        items: List[HistoryRecordItem] = []
+        for _, row in page_df.iterrows():
+            d_str = str(row["date"])
+            dt = pd.to_datetime(d_str)
+            sku = str(row["sku_id"])
+            items.append(
+                HistoryRecordItem(
+                    date=d_str,
+                    store_id=str(row["store_id"]),
+                    sku_id=sku,
+                    category=SKU_CATEGORY_MAP.get(sku, "General"),
+                    units_sold=round(float(row["units_sold"]), 2),
+                    day_of_week=dt.day_name(),
+                    is_weekend=bool(dt.dayofweek >= 5),
+                )
+            )
+
+        return HistoryResponse(
+            items=items,
+            total=total_matching,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            summary=summary,
+            dataset_source="data/processed/sales.csv (Retail Store POS Transactions)",
+            is_real_data=True,
+            unit="units",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch historical data: {exc}",
+        )
+
+
+@app.post(
+    "/forecast",
+    response_model=MobileForecastResponse,
+    summary="Generate mobile demand forecast with uncertainty bounds",
+    description="Calculates store-SKU demand forecasts with moving average baseline, DOW seasonality, promo multipliers, holiday lift, and empirical confidence bounds.",
+)
+def post_forecast(payload: MobileForecastRequest) -> MobileForecastResponse:
+    """Generates demand forecasts with bounds, filtering, and summary statistics."""
+    try:
+        raw_df = load_demand_data()
+        if raw_df.empty:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demand dataset is empty.",
+            )
+
+        if payload.promo_boost:
+            valid_stores = set(raw_df["store_id"].unique())
+            for p_store in payload.promo_boost.keys():
+                if p_store not in valid_stores:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Unknown promotion store '{p_store}'. Must be one of: {sorted(list(valid_stores))}",
+                    )
+
+        conf_level = payload.confidence_level if payload.confidence_level is not None else 0.90
+        fc_df = forecast_demand_with_bounds(
+            df=raw_df,
+            horizon_days=payload.horizon_days,
+            promo_boost=payload.promo_boost,
+            is_holiday_week=payload.is_holiday_week,
+            confidence_level=conf_level,
+        )
+
+        if payload.stores:
+            fc_df = fc_df[fc_df["store_id"].isin(payload.stores)]
+        if payload.skus:
+            fc_df = fc_df[fc_df["sku_id"].isin(payload.skus)]
+        if payload.categories:
+            matching_skus = set()
+            for cat in payload.categories:
+                matching_skus.update([s for s, c in SKU_CATEGORY_MAP.items() if c.lower() == cat.lower()])
+            fc_df = fc_df[fc_df["sku_id"].isin(matching_skus)]
+        if payload.start_date:
+            fc_df = fc_df[fc_df["forecast_date"] >= payload.start_date]
+        if payload.end_date:
+            fc_df = fc_df[fc_df["forecast_date"] <= payload.end_date]
+
+        items: List[MobileForecastItem] = []
+        for _, row in fc_df.iterrows():
+            sku = str(row["sku_id"])
+            items.append(
+                MobileForecastItem(
+                    store_id=str(row["store_id"]),
+                    sku_id=sku,
+                    category=SKU_CATEGORY_MAP.get(sku, "General"),
+                    forecast_date=str(row["forecast_date"]),
+                    baseline_units=float(row["baseline_units"]),
+                    promo_multiplier=float(row["promo_multiplier"]),
+                    holiday_multiplier=float(row["holiday_multiplier"]),
+                    predicted_units=float(row["predicted_units"]),
+                    lower_confidence_bound=float(row["lower_confidence_bound"]),
+                    upper_confidence_bound=float(row["upper_confidence_bound"]),
+                    confidence_level=float(row["confidence_level"]),
+                    uncertainty_risk=str(row["uncertainty_risk"]),
+                )
+            )
+
+        tot_base = round(sum(i.baseline_units for i in items), 2)
+        tot_pred = round(sum(i.predicted_units for i in items), 2)
+        days = payload.horizon_days if payload.horizon_days > 0 else 1
+        avg_daily = round(tot_pred / days, 2)
+        d_stores = len({i.store_id for i in items})
+        d_skus = len({i.sku_id for i in items})
+        start_d = min((i.forecast_date for i in items), default="")
+        end_d = max((i.forecast_date for i in items), default="")
+
+        summary = ForecastSummary(
+            total_baseline_units=tot_base,
+            total_predicted_units=tot_pred,
+            average_daily_units=avg_daily,
+            distinct_stores=d_stores,
+            distinct_skus=d_skus,
+            forecast_start_date=start_d,
+            forecast_end_date=end_d,
+        )
+
+        return MobileForecastResponse(
+            forecast_items=items,
+            summary=summary,
+            horizon_days=payload.horizon_days,
+            is_holiday_week=payload.is_holiday_week,
+            model_name="7-Day Moving Average with DOW Seasonality",
+            algorithm="Moving Average + Multiplicative Day-of-Week Seasonality",
+            dataset_source="data/processed/sales.csv (Retail Store POS Transactions)",
+            is_real_data=True,
+            unit="units",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Forecasting calculation failed: {exc}",
+        )
+
+
+@app.post(
+    "/compare-scenarios",
+    response_model=CompareScenariosResponse,
+    summary="Compare multiple inventory and promotion scenarios",
+    description="Simulates and compares key demand and allocation metrics across 2 to 10 what-if scenarios simultaneously.",
+)
+def post_compare_scenarios(payload: CompareScenariosRequest) -> CompareScenariosResponse:
+    """Runs parallel scenario projections and summarizes relative outcomes."""
+    try:
+        raw_df = load_demand_data()
+        if raw_df.empty:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demand dataset is empty.",
+            )
+
+        metric_items: List[ScenarioMetricItem] = []
+        for sc in payload.scenarios:
+            if sc.promo_boost:
+                valid_stores = set(raw_df["store_id"].unique())
+                for s in sc.promo_boost.keys():
+                    if s not in valid_stores:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Unknown store '{s}' in scenario '{sc.scenario_name}' promo_boost.",
+                        )
+
+            fc = forecast_demand(
+                df=raw_df,
+                horizon_days=sc.horizon_days,
+                promo_boost=sc.promo_boost,
+                is_holiday_week=sc.is_holiday_week,
+            )
+
+            if sc.method == "lp":
+                alloc_df = allocate_inventory_lp(
+                    fc,
+                    total_available_units=sc.total_available_units,
+                    fallback_on_solver_error=True,
+                )
+            else:
+                alloc_df = allocate_inventory(fc, total_available_units=sc.total_available_units)
+
+            sm = alloc_df.attrs.get("summary", get_allocation_summary(alloc_df, sc.total_available_units))
+            dem = float(sm["total_forecasted_demand"])
+            alloc_u = float(sm["total_allocated_units"])
+            short_u = float(sm["total_shortage"])
+            excess_u = float(sm["total_excess"])
+            f_rate = round((alloc_u / dem * 100.0), 2) if dem > 0 else 100.0
+            s_rate = round((short_u / dem * 100.0), 2) if dem > 0 else 0.0
+
+            store_records = [StoreAllocationResult(**r) for r in alloc_df.to_dict(orient="records")]
+            metric_items.append(
+                ScenarioMetricItem(
+                    scenario_name=sc.scenario_name,
+                    horizon_days=sc.horizon_days,
+                    total_available_units=sc.total_available_units,
+                    total_forecasted_demand=dem,
+                    total_allocated_units=alloc_u,
+                    total_shortage=short_u,
+                    total_excess=excess_u,
+                    fulfillment_rate_percentage=f_rate,
+                    shortage_percentage=s_rate,
+                    allocations=store_records,
+                )
+            )
+
+        highest_demand = max(metric_items, key=lambda x: x.total_forecasted_demand).scenario_name
+        lowest_shortage = min(metric_items, key=lambda x: x.total_shortage).scenario_name
+        highest_fulfillment = max(metric_items, key=lambda x: x.fulfillment_rate_percentage).scenario_name
+
+        return CompareScenariosResponse(
+            scenarios=metric_items,
+            summary=ScenarioComparisonSummary(
+                highest_demand_scenario=highest_demand,
+                lowest_shortage_scenario=lowest_shortage,
+                highest_fulfillment_scenario=highest_fulfillment,
+            ),
+            dataset_source="data/processed/sales.csv",
+            is_real_data=True,
+            unit="units",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Scenario comparison failed: {exc}",
+        )
+
+
+@app.get(
+    "/model-metrics",
+    response_model=ModelMetricsResponse,
+    summary="Get forecasting model accuracy metrics",
+    description="Evaluates the moving average forecasting algorithm against a holdout window of historical sales, computing MAE, RMSE, WAPE, and Bias.",
+)
+def get_model_metrics(
+    eval_window_days: int = Query(default=14, ge=7, le=60, description="Holdout evaluation window in days"),
+) -> ModelMetricsResponse:
+    """Calculates empirical holdout accuracy metrics (MAE, RMSE, WAPE, Bias) on historical sales."""
+    try:
+        raw_df = load_demand_data()
+        if raw_df.empty:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demand dataset is empty.",
+            )
+
+        max_dt = pd.to_datetime(raw_df["date"]).max()
+        cutoff_dt = max_dt - pd.Timedelta(days=eval_window_days)
+
+        train_df = raw_df[pd.to_datetime(raw_df["date"]) <= cutoff_dt]
+        test_df = raw_df[pd.to_datetime(raw_df["date"]) > cutoff_dt]
+
+        if train_df.empty or test_df.empty:
+            unique_dates = sorted(raw_df["date"].unique())
+            split_idx = int(len(unique_dates) * 0.8)
+            split_date = unique_dates[split_idx]
+            train_df = raw_df[raw_df["date"] <= split_date]
+            test_df = raw_df[raw_df["date"] > split_date]
+            eval_window_days = len(unique_dates) - split_idx
+
+        fc_df = forecast_demand(df=train_df, horizon_days=eval_window_days)
+
+        merged = pd.merge(
+            test_df,
+            fc_df,
+            left_on=["store_id", "sku_id", "date"],
+            right_on=["store_id", "sku_id", "forecast_date"],
+            how="inner",
+        )
+
+        if merged.empty:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unable to align historical test actuals with forecast dates.",
+            )
+
+        y_true = merged["units_sold"].values
+        y_pred = merged["predicted_units"].values
+        overall_dict = calculate_forecast_metrics(y_true, y_pred)
+        acc_pct = max(0.0, round((1.0 - overall_dict["wape"]) * 100.0, 2))
+
+        overall_metrics = OverallModelMetrics(
+            mae=overall_dict["mae"],
+            rmse=overall_dict["rmse"],
+            wape=overall_dict["wape"],
+            bias=overall_dict["bias"],
+            accuracy_percentage=acc_pct,
+        )
+
+        sku_metrics: List[SkuModelMetric] = []
+        for sku_id, group in merged.groupby("sku_id"):
+            sku_str = str(sku_id)
+            sku_res = calculate_forecast_metrics(group["units_sold"].values, group["predicted_units"].values)
+            sku_metrics.append(
+                SkuModelMetric(
+                    sku_id=sku_str,
+                    category=SKU_CATEGORY_MAP.get(sku_str, "General"),
+                    mae=sku_res["mae"],
+                    rmse=sku_res["rmse"],
+                    wape=sku_res["wape"],
+                    bias=sku_res["bias"],
+                )
+            )
+
+        sku_metrics.sort(key=lambda x: x.sku_id)
+
+        return ModelMetricsResponse(
+            model_name="7-Day Moving Average with DOW Seasonality",
+            algorithm="Moving Average + Multiplicative Day-of-Week Seasonality",
+            dataset_source="data/processed/sales.csv (Retail Store POS Transactions)",
+            is_real_data=True,
+            evaluation_window_days=eval_window_days,
+            evaluated_records=int(len(merged)),
+            overall_metrics=overall_metrics,
+            sku_metrics=sku_metrics,
+            unit="units",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model evaluation failed: {exc}",
         )
 
 
